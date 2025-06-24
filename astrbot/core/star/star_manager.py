@@ -30,6 +30,9 @@ from .filter.permission import PermissionType, PermissionTypeFilter
 from .star import star_map, star_registry
 from .star_handler import star_handlers_registry
 from .updator import PluginUpdator
+from .star_handler import EventType, StarHandlerMetadata
+from .star_handler import star_map
+
 
 try:
     from watchfiles import PythonFilter, awatch
@@ -468,6 +471,9 @@ class PluginManager:
                             metadata.star_cls = metadata.star_cls_type(
                                 context=self.context
                             )
+                        await self._trigger_star_lifecycle_event(
+                            EventType.OnStarActivatedEvent, metadata
+                        )
                     else:
                         logger.info(f"插件 {metadata.name} 已被禁用。")
 
@@ -784,6 +790,10 @@ class PluginManager:
             logger.debug(f"插件 {star_metadata.name} 未被激活，不需要终止，跳过。")
             return
 
+        await self._trigger_star_lifecycle_event(
+            EventType.OnStarDeactivatedEvent, star_metadata
+        )
+
         if hasattr(star_metadata.star_cls, "__del__"):
             asyncio.get_event_loop().run_in_executor(
                 None, star_metadata.star_cls.__del__
@@ -858,3 +868,39 @@ class PluginManager:
             }
 
         return plugin_info
+
+    async def _trigger_star_lifecycle_event(
+        self, event_type: EventType, star_metadata: StarMetadata
+    ):
+        """
+        内部辅助函数，用于触发插件（Star）相关的生命周期事件。
+        Args:
+            event_type: 要触发的事件类型 (EventType.OnStarActivatedEvent 或 EventType.OnStarDeactivatedEvent)。
+            star_metadata: 触发事件的插件的 StarMetadata 对象。
+        """
+        handlers_to_run: List[StarHandlerMetadata] = []
+        # 获取所有监听该事件类型的 handlers
+        handlers = star_handlers_registry.get_handlers_by_event_type(event_type)
+
+        for handler in handlers:
+            # 检查这个 handler 是否监听了特定的插件名
+            target_star_name = handler.extras_configs.get("target_star_name")
+            if target_star_name:
+                # 如果指定了目标插件名，则只在匹配时添加
+                if target_star_name == star_metadata.name:
+                    handlers_to_run.append(handler)
+            else:
+                # 如果没有指定目标插件名，则添加所有 handler
+                handlers_to_run.append(handler)
+
+        for handler in handlers_to_run:
+            try:
+                # 调用插件的钩子函数，并传入 StarMetadata 对象
+                logger.info(
+                    f"hook({event_type.name}) -> {star_map[handler.handler_module_path].name} - {handler.handler_name} (目标插件: {star_metadata.name})"
+                )
+                await handler.handler(star_metadata)  # 传递参数
+            except Exception:
+                logger.error(
+                    f"执行插件 {handler.handler_name} 的 {event_type.name} 钩子时出错: {traceback.format_exc()}"
+                )
