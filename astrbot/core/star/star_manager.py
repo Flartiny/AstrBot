@@ -11,7 +11,7 @@ import os
 import sys
 import traceback
 from types import ModuleType
-from typing import List
+from typing import List, Dict
 
 import yaml
 
@@ -31,7 +31,7 @@ from .star import star_map, star_registry
 from .star_handler import star_handlers_registry
 from .updator import PluginUpdator
 from .star_handler import EventType, StarHandlerMetadata
-from .star_handler import star_map
+from graphlib import TopologicalSorter, CycleError
 
 
 try:
@@ -227,6 +227,7 @@ class PluginManager:
                 desc=metadata["desc"],
                 version=metadata["version"],
                 repo=metadata["repo"] if "repo" in metadata else None,
+                dependencies=metadata.get("dependencies", []),
             )
 
         return metadata
@@ -378,9 +379,9 @@ class PluginManager:
 
         alter_cmd = sp.get("alter_cmd", {})
 
-        plugin_modules = self._get_plugin_modules()
+        plugin_modules, msg = await self._get_load_order(specified_dir_name, specified_module_path)
         if plugin_modules is None:
-            return False, "未找到任何插件模块"
+            return False, msg
 
         fail_rec = ""
 
@@ -904,3 +905,71 @@ class PluginManager:
                 logger.error(
                     f"执行插件 {handler.handler_name} 的 {event_type.name} 钩子时出错: {traceback.format_exc()}"
                 )
+
+    def _get_plugin_dir_path(self, root_dir_name: str, is_reserved: bool) -> str:
+        """根据插件的根目录名和是否为保留插件，返回插件的完整文件路径。"""
+        return (
+            os.path.join(self.plugin_store_path, root_dir_name)
+            if not is_reserved
+            else os.path.join(self.reserved_plugin_path, root_dir_name)
+        )
+
+    def _build_module_path(self, plugin_module_info: dict) -> str:
+        """根据插件模块信息构建完整的模块路径。"""
+        reserved = plugin_module_info.get("reserved", False)
+        path_prefix = "packages." if reserved else "data.plugins."
+        return f"{path_prefix}{plugin_module_info['pname']}.{plugin_module_info['module']}"
+
+    async def _get_load_order(self, specified_dir_name: str = None, specified_module_path: str = None):
+        plugin_modules = self._get_plugin_modules()
+        if plugin_modules is None:
+            return None, "未找到任何插件模块"
+        all_plugins_metadata_map: Dict[str, StarMetadata] = {}
+        dependency_graph_for_sorter: Dict[str, set[str]] = {}
+        name2module = {}
+        reserved_plugins = []
+        for plugin_module in plugin_modules:
+            module_path = self._build_module_path(plugin_module)
+            root_dir_name = plugin_module["pname"]
+            is_reserved = plugin_module.get("reserved", False)
+            plugin_dir_path = self._get_plugin_dir_path(root_dir_name, is_reserved)
+            if (specified_module_path and module_path != specified_module_path):
+                continue
+            if (specified_dir_name and root_dir_name != specified_dir_name):
+                continue
+            try:
+                metadata  = self._load_plugin_metadata(plugin_dir_path)
+                if metadata:
+                    all_plugins_metadata_map[root_dir_name] = metadata
+                    name2module[root_dir_name] = plugin_module
+                    dependency_graph_for_sorter[root_dir_name] = set()
+                elif is_reserved:
+                    reserved_plugins.append(plugin_module)
+                else:
+                    logger.warning(f"插件 {root_dir_name} 未找到有效的 metadata.yaml, 跳过加载元数据。")
+            except Exception as e:
+                pass
+
+        for root_dir_name, metadata in all_plugins_metadata_map.items():
+            for dep_name in metadata.dependencies:
+                if dep_name not in dependency_graph_for_sorter:
+                    logger.warning(f"插件 {root_dir_name} 声明依赖 {dep_name}，但该插件未被发现。")
+                    continue
+                dependency_graph_for_sorter[dep_name].add(root_dir_name)
+
+        try:
+            sorter = TopologicalSorter(dependency_graph_for_sorter)
+            load_order_names = list(sorter.static_order())
+            logger.info(f"非系统插件加载顺序：{load_order_names}")
+
+        except CycleError as e:
+            logger.error(f"插件存在循环依赖，无法确定加载顺序: {e.args[0]}")
+            return None, f"插件存在循环依赖，无法加载: {e.args[0]}"
+        except Exception as e:
+            logger.error(f"拓扑排序失败: {traceback.format_exc()}")
+            return None, f"拓扑排序失败: {str(e)}"
+
+        load_order_modules = [name2module[name] for name in load_order_names]
+        load_order_modules = reserved_plugins + load_order_modules
+
+        return load_order_modules, None
