@@ -31,8 +31,7 @@ from .star import star_map, star_registry
 from .star_handler import star_handlers_registry
 from .updator import PluginUpdator
 from .star_handler import EventType, StarHandlerMetadata
-from graphlib import TopologicalSorter, CycleError
-
+import networkx as nx
 
 try:
     from watchfiles import PythonFilter, awatch
@@ -321,21 +320,11 @@ class PluginManager:
             star_handlers_registry.clear()
             star_map.clear()
             star_registry.clear()
+            plugin_modules = await self._get_load_order()
+            result = await self.load(plugin_modules=plugin_modules)
         else:
             # 只重载指定插件
-            smd = star_map.get(specified_module_path)
-            if smd:
-                try:
-                    await self._terminate_plugin(smd)
-                except Exception as e:
-                    logger.warning(traceback.format_exc())
-                    logger.warning(
-                        f"插件 {smd.name} 未被正常终止: {str(e)}, 可能会导致该插件运行不正常。"
-                    )
-
-                await self._unbind_plugin(smd.name, specified_module_path)
-
-        result = await self.load(specified_module_path)
+            result = await self.batch_reload(specified_module_path=specified_module_path)
 
         # 更新所有插件的平台兼容性
         await self.update_all_platform_compatibility()
@@ -361,7 +350,7 @@ class PluginManager:
 
         return True
 
-    async def load(self, specified_module_path=None, specified_dir_name=None):
+    async def load(self, plugin_modules=None):
         """载入插件。
         当 specified_module_path 或者 specified_dir_name 不为 None 时，只载入指定的插件。
 
@@ -379,10 +368,9 @@ class PluginManager:
 
         alter_cmd = sp.get("alter_cmd", {})
 
-        plugin_modules, msg = await self._get_load_order(specified_dir_name, specified_module_path)
-        if plugin_modules is None:
-            return False, msg
-
+        if not plugin_modules:
+            return False, "未找到任何插件模块"
+        logger.info(f"正在按顺序加载插件: {[plugin_module['pname'] for plugin_module in plugin_modules]}")
         fail_rec = ""
 
         # 导入插件模块，并尝试实例化插件类
@@ -397,12 +385,6 @@ class PluginManager:
 
                 path = "data.plugins." if not reserved else "packages."
                 path += root_dir_name + "." + module_str
-
-                # 检查是否需要载入指定的插件
-                if specified_module_path and path != specified_module_path:
-                    continue
-                if specified_dir_name and root_dir_name != specified_dir_name:
-                    continue
 
                 logger.info(f"正在载入插件 {root_dir_name} ...")
 
@@ -632,7 +614,8 @@ class PluginManager:
         plugin_path = await self.updator.install(repo_url, proxy)
         # reload the plugin
         dir_name = os.path.basename(plugin_path)
-        await self.load(specified_dir_name=dir_name)
+        plugin_modules = await self._get_load_order(specified_dir_name=dir_name)
+        await self.batch_reload(plugin_modules=plugin_modules)
 
         # Get the plugin metadata to return repo info
         plugin = self.context.get_registered_star(dir_name)
@@ -836,7 +819,8 @@ class PluginManager:
         except BaseException as e:
             logger.warning(f"删除插件压缩包失败: {str(e)}")
         # await self.reload()
-        await self.load(specified_dir_name=dir_name)
+        plugin_modules = await self._get_load_order(specified_dir_name=dir_name)
+        await self.batch_reload(plugin_modules=plugin_modules)
 
         # Get the plugin metadata to return repo info
         plugin = self.context.get_registered_star(dir_name)
@@ -886,12 +870,8 @@ class PluginManager:
         for handler in handlers:
             # 检查这个 handler 是否监听了特定的插件名
             target_star_name = handler.extras_configs.get("target_star_name")
-            if target_star_name:
+            if target_star_name and target_star_name == star_metadata.name:
                 # 如果指定了目标插件名，则只在匹配时添加
-                if target_star_name == star_metadata.name:
-                    handlers_to_run.append(handler)
-            else:
-                # 如果没有指定目标插件名，则添加所有 handler
                 handlers_to_run.append(handler)
 
         for handler in handlers_to_run:
@@ -921,55 +901,72 @@ class PluginManager:
         return f"{path_prefix}{plugin_module_info['pname']}.{plugin_module_info['module']}"
 
     async def _get_load_order(self, specified_dir_name: str = None, specified_module_path: str = None):
+        star_graph = self._build_star_graph()
+        if star_graph is None:
+            return None
+        try:
+            if specified_dir_name:
+                for node in star_graph:
+                    if star_graph.nodes[node]["data"].get("pname") == specified_dir_name:
+                        dependent_nodes = nx.descendants(star_graph, node)
+                        sub_graph = star_graph.subgraph(dependent_nodes.union({node}))
+                        load_order = list(nx.topological_sort(sub_graph))
+                        return [star_graph.nodes[node]["data"] for node in load_order]
+            elif specified_module_path:
+                for node in star_graph:
+                    if specified_module_path == self._build_module_path(star_graph.nodes[node].get("data")):
+                        dependent_nodes = nx.descendants(star_graph, node)
+                        sub_graph = star_graph.subgraph(dependent_nodes.union({node}))
+                        load_order = list(nx.topological_sort(sub_graph))
+                        return [star_graph.nodes[node]["data"] for node in load_order]
+            else:
+                return [star_graph.nodes[node]["data"] for node in list(nx.topological_sort(star_graph))]
+        except nx.NetworkXUnfeasible:
+            logger.error("出现循环依赖，无法确定加载顺序，按自然顺序加载")
+            return [star_graph.nodes[node]["data"] for node in star_graph]
+
+    def _build_star_graph(self):
         plugin_modules = self._get_plugin_modules()
         if plugin_modules is None:
-            return None, "未找到任何插件模块"
-        all_plugins_metadata_map: Dict[str, StarMetadata] = {}
-        dependency_graph_for_sorter: Dict[str, set[str]] = {}
-        name2module = {}
-        reserved_plugins = []
+            return None
+        G = nx.DiGraph()
         for plugin_module in plugin_modules:
-            module_path = self._build_module_path(plugin_module)
             root_dir_name = plugin_module["pname"]
             is_reserved = plugin_module.get("reserved", False)
             plugin_dir_path = self._get_plugin_dir_path(root_dir_name, is_reserved)
-            if (specified_module_path and module_path != specified_module_path):
-                continue
-            if (specified_dir_name and root_dir_name != specified_dir_name):
-                continue
+            G.add_node(root_dir_name, data=plugin_module)
             try:
                 metadata  = self._load_plugin_metadata(plugin_dir_path)
                 if metadata:
-                    all_plugins_metadata_map[root_dir_name] = metadata
-                    name2module[root_dir_name] = plugin_module
-                    dependency_graph_for_sorter[root_dir_name] = set()
-                elif is_reserved:
-                    reserved_plugins.append(plugin_module)
-                else:
-                    logger.warning(f"插件 {root_dir_name} 未找到有效的 metadata.yaml, 跳过加载元数据。")
-            except Exception as e:
+                    for dep_name in metadata.dependencies:
+                        G.add_edge(root_dir_name, dep_name)
+            except Exception:
                 pass
+        # 过滤不存在的依赖(出边没有data, 就删除指向的节点)
+        nodes_to_remove = []
+        for node_name in list(G.nodes()):
+            for neighbor in list(G.neighbors(node_name)):
+                if G.nodes[neighbor].get("data") is None:
+                    nodes_to_remove.append(neighbor)
+                    logger.warning(f"插件 {node_name} 声明依赖 {neighbor}, 但该插件未被发现，跳过加载。")
+        for node in nodes_to_remove:
+            G.remove_node(node)
+        return G
 
-        for root_dir_name, metadata in all_plugins_metadata_map.items():
-            for dep_name in metadata.dependencies:
-                if dep_name not in dependency_graph_for_sorter:
-                    logger.warning(f"插件 {root_dir_name} 声明依赖 {dep_name}，但该插件未被发现。")
-                    continue
-                dependency_graph_for_sorter[dep_name].add(root_dir_name)
+    async def batch_reload(self, specified_module_path = None, plugin_modules = None):
+        if not plugin_modules:
+            plugin_modules = await self._get_load_order(specified_module_path = specified_module_path)
+        for plugin_module in plugin_modules:
+            specified_module_path = self._build_module_path(plugin_module)
+            smd = star_map.get(specified_module_path)
+            if smd:
+                try:
+                    await self._terminate_plugin(smd)
+                except Exception as e:
+                    logger.warning(traceback.format_exc())
+                    logger.warning(
+                        f"插件 {smd.name} 未被正常终止: {str(e)}, 可能会导致该插件运行不正常。"
+                    )
+                await self._unbind_plugin(smd.name, specified_module_path)
 
-        try:
-            sorter = TopologicalSorter(dependency_graph_for_sorter)
-            load_order_names = list(sorter.static_order())
-            logger.info(f"非系统插件加载顺序：{load_order_names}")
-
-        except CycleError as e:
-            logger.error(f"插件存在循环依赖，无法确定加载顺序: {e.args[0]}")
-            return None, f"插件存在循环依赖，无法加载: {e.args[0]}"
-        except Exception as e:
-            logger.error(f"拓扑排序失败: {traceback.format_exc()}")
-            return None, f"拓扑排序失败: {str(e)}"
-
-        load_order_modules = [name2module[name] for name in load_order_names]
-        load_order_modules = reserved_plugins + load_order_modules
-
-        return load_order_modules, None
+        return await self.load(plugin_modules=plugin_modules)
