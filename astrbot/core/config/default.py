@@ -3,6 +3,7 @@
 """
 
 import os
+
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 VERSION = "3.5.17"
@@ -12,7 +13,7 @@ DB_PATH = os.path.join(get_astrbot_data_path(), "data_v3.db")
 DEFAULT_CONFIG = {
     "config_version": 2,
     "platform_settings": {
-        "plugin_enable":[],
+        "plugin_enable": [],
         "unique_session": False,
         "rate_limit": {
             "time": 60,
@@ -387,10 +388,6 @@ CONFIG_METADATA_2 = {
                         "description": "Discord 活动名称",
                         "type": "string",
                         "hint": "可选的 Discord 活动名称。留空则不设置活动。",
-                    },
-                    "discord_guild_id_for_debug": {
-                        "description": "【开发用】指定一个服务器(Guild)ID。在此服务器注册的指令会立刻生效，便于调试。留空则注册为全局指令。",
-                        "type": "string",
                     },
                 },
             },
@@ -975,6 +972,18 @@ CONFIG_METADATA_2 = {
                         "volcengine_speed_ratio": 1.0,
                         "api_base": "https://openspeech.bytedance.com/api/v1/tts",
                         "timeout": 20,
+                    },
+                    "Gemini TTS": {
+                        "id": "gemini_tts",
+                        "type": "gemini_tts",
+                        "provider_type": "text_to_speech",
+                        "enable": False,
+                        "gemini_tts_api_key": "",
+                        "gemini_tts_api_base": "",
+                        "gemini_tts_timeout": 20,
+                        "gemini_tts_model": "gemini-2.5-flash-preview-tts",
+                        "gemini_tts_prefix": "",
+                        "gemini_tts_voice_name": "Leda",
                     },
                     "OpenAI Embedding": {
                         "id": "openai_embedding",
