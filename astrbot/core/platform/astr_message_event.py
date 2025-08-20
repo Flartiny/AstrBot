@@ -3,7 +3,7 @@ import asyncio
 import re
 import hashlib
 import uuid
-from dataclasses import dataclass
+
 from typing import List, Union, Optional, AsyncGenerator
 
 from astrbot.core.db.po import Conversation
@@ -23,21 +23,7 @@ from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.utils.metrics import Metric
 from .astrbot_message import AstrBotMessage, Group
 from .platform_metadata import PlatformMetadata
-
-
-@dataclass
-class MessageSesion:
-    platform_name: str
-    message_type: MessageType
-    session_id: str
-
-    def __str__(self):
-        return f"{self.platform_name}:{self.message_type.value}:{self.session_id}"
-
-    @staticmethod
-    def from_str(session_str: str):
-        platform_name, message_type, session_id = session_str.split(":")
-        return MessageSesion(platform_name, MessageType(message_type), session_id)
+from .message_session import MessageSession, MessageSesion # noqa
 
 
 class AstrMessageEvent(abc.ABC):
@@ -64,7 +50,7 @@ class AstrMessageEvent(abc.ABC):
         """是否是 At 机器人或者带有唤醒词或者是私聊(插件注册的事件监听器会让 is_wake 设为 True, 但是不会让这个属性置为 True)"""
         self._extras = {}
         self.session = MessageSesion(
-            platform_name=platform_meta.name,
+            platform_name=platform_meta.id,
             message_type=message_obj.type,
             session_id=session_id,
         )
@@ -82,9 +68,16 @@ class AstrMessageEvent(abc.ABC):
         self.platform = platform_meta
 
     def get_platform_name(self):
+        """获取这个事件所属的平台的类型（如 aiocqhttp, slack, discord 等）。
+
+        NOTE: 用户可能会同时运行多个相同类型的平台适配器。"""
         return self.platform_meta.name
 
     def get_platform_id(self):
+        """获取这个事件所属的平台的 ID。
+
+        NOTE: 用户可能会同时运行多个相同类型的平台适配器，但能确定的是 ID 是唯一的。
+        """
         return self.platform_meta.id
 
     def get_message_str(self) -> str:
@@ -227,7 +220,7 @@ class AstrMessageEvent(abc.ABC):
     ):
         """发送流式消息到消息平台，使用异步生成器。
         目前仅支持: telegram，qq official 私聊。
-        Fallback仅支持 aiocqhttp, gewechat。
+        Fallback仅支持 aiocqhttp。
         """
         asyncio.create_task(
             Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name)
@@ -419,7 +412,6 @@ class AstrMessageEvent(abc.ABC):
 
         适配情况:
 
-        - gewechat
         - aiocqhttp(OneBotv11)
         """
         ...
