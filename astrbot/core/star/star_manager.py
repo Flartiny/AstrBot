@@ -371,7 +371,6 @@ class PluginManager:
         inactivated_llm_tools = await sp.global_get("inactivated_llm_tools", [])
         alter_cmd = await sp.global_get("alter_cmd", {})
 
-        plugin_modules = self._get_plugin_modules()
         if plugin_modules is None:
             return False, "未找到任何插件模块"
         logger.info(
