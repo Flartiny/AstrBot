@@ -32,6 +32,7 @@ from astrbot.core.utils.metrics import Metric
 from ...context import PipelineContext, call_event_hook, call_handler
 from ..stage import Stage
 from astrbot.core.provider.register import llm_tools
+from astrbot.core.star.star_handler import star_map
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 try:
@@ -170,11 +171,14 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         )
         async for resp in wrapper:
             if resp is not None:
-                text_content = mcp.types.TextContent(
-                    type="text",
-                    text=str(resp),
-                )
-                yield mcp.types.CallToolResult(content=[text_content])
+                if isinstance(resp, mcp.types.CallToolResult):
+                    yield resp
+                else:
+                    text_content = mcp.types.TextContent(
+                        type="text",
+                        text=str(resp),
+                    )
+                    yield mcp.types.CallToolResult(content=[text_content])
             else:
                 # NOTE: Tool 在这里直接请求发送消息给用户
                 # TODO: 是否需要判断 event.get_result() 是否为空?
@@ -422,9 +426,20 @@ class LLMRequestSubStage(Stage):
                 req.image_urls = []
         if req.func_tool:
             provider_cfg = provider.provider_config.get("modalities", ["tool_use"])
+            # 如果模型不支持工具使用，但请求中包含工具列表，则清空。
             if "tool_use" not in provider_cfg:
                 logger.debug(f"用户设置提供商 {provider} 不支持工具使用，清空工具列表。")
                 req.func_tool = None
+        # 插件可用性设置
+        if event.plugins_name is not None and req.func_tool:
+            new_tool_set = ToolSet()
+            for tool in req.func_tool.tools:
+                plugin = star_map.get(tool.handler_module_path)
+                if not plugin:
+                    continue
+                if plugin.name in event.plugins_name or plugin.reserved:
+                    new_tool_set.add_tool(tool)
+            req.func_tool = new_tool_set
 
         # run agent
         agent_runner = AgentRunner()
