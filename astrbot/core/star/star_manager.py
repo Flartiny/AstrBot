@@ -331,7 +331,7 @@ class PluginManager:
                 )
 
             return result
-          
+
     async def load(self, plugin_modules=None):
         """载入插件。
         当 specified_module_path 或者 specified_dir_name 不为 None 时，只载入指定的插件。
@@ -937,10 +937,21 @@ class PluginManager:
                         load_order = list(nx.topological_sort(sub_graph))
                         return [star_graph.nodes[node]["data"] for node in load_order]
             else:
-                return [
+                sorted_nodes = list(nx.topological_sort(star_graph))
+
+                reserved_plugins = [
                     star_graph.nodes[node]["data"]
-                    for node in list(nx.topological_sort(star_graph))
+                    for node in sorted_nodes
+                    if star_graph.nodes[node]["data"].get("reserved", False)
                 ]
+                non_reserved_plugins = [
+                    star_graph.nodes[node]["data"]
+                    for node in sorted_nodes
+                    if not star_graph.nodes[node]["data"].get("reserved", False)
+                ]
+
+                return reserved_plugins + non_reserved_plugins
+
         except nx.NetworkXUnfeasible:
             logger.error("出现循环依赖，无法确定加载顺序，按自然顺序加载")
             return [star_graph.nodes[node]["data"] for node in star_graph]
