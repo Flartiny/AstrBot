@@ -602,10 +602,10 @@ onMounted(async () => {
             <div style="flex-grow: 1; min-width: 250px; max-width: 400px; margin-left: auto; margin-top: 8px;">
               <v-text-field v-if="activeTab == 'market'" v-model="marketSearch" density="compact"
                 :label="tm('search.marketPlaceholder')" prepend-inner-icon="mdi-magnify" variant="solo-filled" flat
-                hide-details single-line>
+                hide-details single-line clearable>
               </v-text-field>
               <v-text-field v-else v-model="pluginSearch" density="compact" :label="tm('search.placeholder')"
-                prepend-inner-icon="mdi-magnify" variant="solo-filled" flat hide-details single-line>
+                prepend-inner-icon="mdi-magnify" variant="solo-filled" flat hide-details single-line clearable>
               </v-text-field>
             </div>
 
